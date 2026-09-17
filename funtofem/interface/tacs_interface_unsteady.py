@@ -28,7 +28,7 @@ __all__ = [
 ]
 
 from mpi4py import MPI
-from tacs import TACS, pytacs, functions
+from tacs import TACS, pytacs, functions#,pyMeshLoader
 from .utils import f2f_callback
 from ._solver_interface import SolverInterface
 from typing import TYPE_CHECKING
@@ -124,6 +124,7 @@ class TacsUnsteadyInterface(SolverInterface):
         tacs_comm=None,
         nprocs=None,
         debug=False,
+        struct_transfer_nodes = None,
     ):
         self.comm = comm
         self.tacs_comm = tacs_comm
@@ -156,15 +157,28 @@ class TacsUnsteadyInterface(SolverInterface):
             model, assembler, thermal_index=thermal_index, struct_id=struct_id
         )
 
+        self.struct_transfer_nodes = struct_transfer_nodes
+        self.struct_transfer_inds = None
+
         if self.assembler is not None:
             if self.tacs_comm is None:
                 self.tacs_comm = self.assembler.getMPIComm()
 
-            # Initialize the structural nodes in the bodies
             struct_X = self.struct_X.getArray()
+ 
             for body in model.bodies:
-                body.initialize_struct_nodes(struct_X, struct_id=struct_id)
+                if self.struct_transfer_nodes is not None:
+                    struct_X_transfer = np.zeros(3*len(self.struct_transfer_nodes),dtype = TACS.dtype)
+                    
+                    for i in range(3):
+                        struct_X_transfer[i::3] = struct_X[3*self.struct_transfer_nodes + i]
 
+                    #body.initialize_struct_nodes(struct_X, struct_id=struct_id)
+                    body.initialize_struct_nodes(struct_X_transfer, struct_id=struct_id)
+                else:
+                    body.initialize_struct_nodes(struct_X, struct_id=struct_id)
+            
+            
     # Allocate data for each scenario
     class ScenarioData:
         def __init__(self, assembler, func_list, func_tags):
@@ -491,10 +505,16 @@ class TacsUnsteadyInterface(SolverInterface):
             for body in bodies:
                 # get an in-place array of the structural nodes
                 struct_X = self.struct_X.getArray()
-
+                
                 # set the structural node locations into the array
-                struct_X[:] = body.get_struct_nodes()
+                print(np.size(body.get_struct_nodes()),"-----size of body_struct_nodes")
 
+                if self.struct_transfer_nodes is not None:
+                    #struct_X[self.struct_transfer_nodes] = body.get_struct_nodes()[self.struct_transfer_nodes]
+                    struct_X[self.struct_transfer_nodes] = body.get_struct_nodes()
+                else:
+                    struct_X[:] = body.get_struct_nodes()
+                
                 # set the structural nodes into the tacs assembler
                 self.assembler.setNodes(self.struct_X)
 
@@ -555,20 +575,33 @@ class TacsUnsteadyInterface(SolverInterface):
             # Copy external loads and heat fluxes to the structure
             # Does this overwrite loads from multiple bodies on same elements?
             for body in bodies:
-                # get and copy struct loads into ext_force_array
-                struct_loads = body.get_struct_loads(scenario, time_index=step)
-                if struct_loads is not None:
-                    for i in range(3):
-                        ext_force_array[i::ndof] += struct_loads[i::3].astype(
-                            TACS.dtype
-                        )
+                if self.struct_transfer_nodes is not None:
 
-                # get and copy struct heat fluxes into ext_forces
-                struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
-                if struct_flux is not None:
-                    ext_force_array[self.thermal_index :: ndof] += struct_flux[
-                        :
-                    ].astype(TACS.dtype)
+
+                    struct_loads = body.get_struct_loads(scenario,time_index = step)
+                    print(np.size(struct_loads),f"----size of struct_loads")
+                    if struct_loads is not None:
+                        for i in range(3):
+                            ext_force_array[ndof * self.struct_transfer_nodes + i] += struct_loads[i::3].astype(TACS.dtype)
+
+                    struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
+                    print(np.size(struct_flux),"----size of struct flux")
+                    if struct_flux is not None:
+                        #ext_force_array[self.struct_transfer_nodes +self.thermal_index * np.ones_like(self.struct_transfer_nodes)] += struct_flux[self.struct_transfer_nodes - 1 * np.ones_like(self.struct_transfer_nodes)].astype(TACS.dtype)
+                        ext_force_array[self.struct_transfer_nodes +self.thermal_index * np.ones_like(self.struct_transfer_nodes)] += struct_flux[:].astype(TACS.dtype)
+
+                else:
+
+                     # get and copy struct loads into ext_force_array
+                    struct_loads = body.get_struct_loads(scenario, time_index=step)
+                    if struct_loads is not None:
+                        for i in range(3):
+                            ext_force_array[i::ndof] += struct_loads[i::3].astype(TACS.dtype)
+
+                    #get and copy struct heat fluxes into ext_forces
+                    struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
+                    if struct_flux is not None:
+                        ext_force_array[self.thermal_index :: ndof] += struct_flux[:].astype(TACS.dtype)
 
             # Iterate the TACS integrator
             self.integrator[scenario.id].iterate(step, self.ext_force)
@@ -578,19 +611,26 @@ class TacsUnsteadyInterface(SolverInterface):
             states = self.ans.getArray()
 
             for body in bodies:
-                # copy struct_disps to the body
                 struct_disps = body.get_struct_disps(scenario, time_index=step)
-                if struct_disps is not None:
-                    for i in range(3):
-                        struct_disps[i::3] = states[i::ndof].astype(body.dtype)
+                if self.struct_transfer_nodes is not None:
+                    if struct_disps is not None:
+                        for i in range(3):
+                            struct_disps[i::3] = states[ndof * self.struct_transfer_nodes + i].astype(body.dtype)
 
-                # copy struct temps to the body, converting from gauge to absolute temp with T_ref
-                struct_temps = body.get_struct_temps(scenario, time_index=step)
-                if struct_temps is not None:
-                    struct_temps[:] = (
-                        states[self.thermal_index :: ndof].astype(body.dtype)
-                        + scenario.T_ref
-                    )
+                        # copy struct temps to the body, converting from gauge to absolute temp with T_ref
+                    struct_temps = body.get_struct_temps(scenario, time_index=step)
+                    if struct_temps is not None:
+                        struct_temps[self.struct_transfer_nodes - 1*np.ones_like(self.struct_transfer_nodes)] =  (states[self.struct_transfer_nodes + self.thermal_index * np.ones_like(self.struct_transfer_nodes)].astype(body.dtype) + scenario.T_ref)
+                else:
+                    if struct_disps is not None:
+                        for i in range(3):
+                            struct_disps[i::3] = states[i::ndof].astype(body.dtype)
+
+                        # copy struct temps to the body, converting from gauge to absolute temp with T_ref
+                    struct_temps = body.get_struct_temps(scenario, time_index=step)
+                    if struct_temps is not None:
+                            struct_temps[:] = (
+                                states[self.thermal_index :: ndof].astype(body.dtype) + scenario.T_ref)
 
         return fail
 
@@ -959,6 +999,7 @@ class TacsUnsteadyInterface(SolverInterface):
         comm,
         nprocs,
         bdf_file,
+        struct_transfer_nodes_nastran=None,
         output_dir=None,
         callback=None,
         struct_options={},
@@ -1033,7 +1074,6 @@ class TacsUnsteadyInterface(SolverInterface):
 
             # Set the assembler
             assembler = fea_assembler.assembler
-
             # Set the output file creator
             f5 = fea_assembler.outputViewer
 
@@ -1042,6 +1082,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
         # get struct ids for coordinate derivatives and .sens file
         struct_id = None
+        local_transfer_tacs_ids = None
         if assembler is not None:
             # get list of local node IDs with global size, with -1 for nodes not owned by this proc
             num_nodes = fea_assembler.meshLoader.bdfInfo.nnodes
@@ -1049,6 +1090,13 @@ class TacsUnsteadyInterface(SolverInterface):
             local_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
                 bdfNodes, nastranOrdering=False
             )
+
+            if struct_transfer_nodes_nastran is not None:
+                global_transfer_tacs_ids =  fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(struct_transfer_nodes_nastran, nastranOrdering=True)
+                local_transfer_tacs_ids = np.intersect1d(local_tacs_ids, global_transfer_tacs_ids)[1:]
+                #TODO get rid of the leading -1 since the two are basically always going to share a -1
+            else:
+                local_transfer_tacs_ids = None #default to the all local nodes
 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
@@ -1087,7 +1135,8 @@ class TacsUnsteadyInterface(SolverInterface):
 
         # Broad cast the thermal index to ensure it's the same on all procs
         thermal_index = comm.bcast(thermal_index, root=0)
-
+        
+        print("tacs_from_bdf_local:",local_transfer_tacs_ids)
         # Create the tacs interface
         return cls(
             comm,
@@ -1098,4 +1147,5 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_id=struct_id,
             tacs_comm=tacs_comm,
             debug=debug,
+            struct_transfer_nodes=local_transfer_tacs_ids,
         )
