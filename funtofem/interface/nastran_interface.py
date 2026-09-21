@@ -2,8 +2,6 @@ import numpy as np
 from pyfuntofem.driver import SolverInterface
 from funtofem import TransferScheme
 import os
-from pyNastran.bdf.bdf import BDF
-from pyNastran.op2.op2 import OP2
 
 class NastranInterface(SolverInterface):
     """
