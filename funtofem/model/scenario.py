@@ -726,7 +726,7 @@ class Scenario(Base):
             self.post_adjoint_coupling_freq = post_adjoint_coupling_freq
         return self
 
-    def set_flow_ref_vals(self, qinf: float = 1.0, flow_dt: float = 1.0):
+    def set_flow_ref_vals(self, qinf: float = 1.0,thermal_scale:float = 1.0, flow_dt: float = 1.0):
         """
         Set flow reference values for FUN3D nondimensionalization.
         flow_dt should always be 1.0 for steady scenarios.
@@ -739,11 +739,14 @@ class Scenario(Base):
             Should be equal to non-dimensional time step in fun3d.nml (equals time_step_nondim)
         qinf: float
             Dynamic pressure of the freestream flow. Used to nondimensionalize force in FUN3D.
+        thermal_scale: float
+            Scaling term defined as 0.5 * rho_ref* V_ref ** 3, Used to nodimensionalize heat flux in FUN3D
         """
 
         self.qinf = qinf
         self.flow_dt = flow_dt
-
+        self.thermal_scale = thermal_scale
+        
         if self.steady is True and float(self.flow_dt) != 1.0:
             raise ValueError("For steady cases, flow_dt must be set to 1.")
         return self

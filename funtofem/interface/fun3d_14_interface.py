@@ -128,7 +128,6 @@ class Fun3d14Interface(SolverInterface):
         self.dFdqinf = []
 
         # heat flux
-        self.thermal_scale = 41447350.23611797  #68e6#0.5*1.200*2015.43**3  # = 1/2 * rho_inf * (V_inf)^3
         self.dHdq = []
 
         # optional per-step aerothermal diagnostics
@@ -456,7 +455,7 @@ class Fun3d14Interface(SolverInterface):
             elif "dynamic pressure" == var.name.lower():
                 scenario.qinf = var.value
             elif "thermal scale" == var.name.lower():
-                self.thermal_scale = var.value
+                scenario.thermal_scale = var.value
 
         # push the push the shape and rigid motion variables
         for ibody, body in enumerate(bodies, 1):
@@ -734,7 +733,7 @@ class Fun3d14Interface(SolverInterface):
                 # Extract the area-weighted temperature gradient normal to the wall (along the unit norm)
                 dTdn = self.fun3d_flow.extract_cqa(aero_nnodes, body=ibody)
                 cqx, cqy, cqz = self.fun3d_flow.extract_heat_flux(aero_nnodes, body=ibody)
-                cq_mag = np.sqrt(cqx*cqx + cqy*cqy + cqz*cqz)*self.thermal_scale 
+                cq_mag = np.sqrt(cqx*cqx + cqy*cqy + cqz*cqz)*scenario.thermal_scale 
 
                 dTdn_dim = dTdn * scenario.T_inf
 

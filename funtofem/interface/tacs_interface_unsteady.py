@@ -167,12 +167,6 @@ class TacsUnsteadyInterface(SolverInterface):
             num_nodes = len(struct_X_array//3)
             dof_per_node = self.assembler.getVarsPerNode()
             
-            if self.struct_transfer_nodes is None:
-                self.struct_X_indices = slice(None)
-            else:
-                self.struct_X_indices = np.zeros(3 * len(self.struct_transfer_nodes),dtype = int)
-                for i in range(3):
-                    self.struct_X_indices[i::3] = 3 * self.struct_transfer_nodes + i
             # Initialize the structural nodes in the bodies
             for body in model.bodies:
                 body.initialize_struct_nodes(
