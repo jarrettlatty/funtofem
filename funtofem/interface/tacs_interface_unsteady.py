@@ -164,9 +164,9 @@ class TacsUnsteadyInterface(SolverInterface):
 
         if self.assembler is not None:
             struct_X_array = self.struct_X.getArray()
-            num_nodes = len(struct_X_array//3)
+            num_nodes = len(struct_X_array // 3)
             dof_per_node = self.assembler.getVarsPerNode()
-            
+
             # Initialize the structural nodes in the bodies
             for body in model.bodies:
                 body.initialize_struct_nodes(
@@ -1009,7 +1009,7 @@ class TacsUnsteadyInterface(SolverInterface):
         output_dir=None,
         callback=None,
         struct_options={},
-        struct_transfer_nodes_nastran = None,
+        struct_transfer_nodes_nastran=None,
         thermal_index=-1,
         debug=False,
     ):
@@ -1101,9 +1101,14 @@ class TacsUnsteadyInterface(SolverInterface):
                 bdfNodes, nastranOrdering=False
             )
             if struct_transfer_nodes_nastran is not None:
-                global_transfer_tacs_ids =  fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
-                                                    struct_transfer_nodes_nastran, nastranOrdering=True)
-                local_transfer_tacs_ids = np.intersect1d(local_tacs_ids, global_transfer_tacs_ids)[1:]
+                global_transfer_tacs_ids = (
+                    fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
+                        struct_transfer_nodes_nastran, nastranOrdering=True
+                    )
+                )
+                local_transfer_tacs_ids = np.intersect1d(
+                    local_tacs_ids, global_transfer_tacs_ids
+                )[1:]
 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
@@ -1153,5 +1158,5 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_id=struct_id,
             tacs_comm=tacs_comm,
             debug=debug,
-            struct_interface_nodes = local_transfer_tacs_ids,
+            struct_interface_nodes=local_transfer_tacs_ids,
         )

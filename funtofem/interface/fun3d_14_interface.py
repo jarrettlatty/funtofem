@@ -732,8 +732,12 @@ class Fun3d14Interface(SolverInterface):
             if heat_flux is not None and aero_nnodes > 0:
                 # Extract the area-weighted temperature gradient normal to the wall (along the unit norm)
                 dTdn = self.fun3d_flow.extract_cqa(aero_nnodes, body=ibody)
-                cqx, cqy, cqz = self.fun3d_flow.extract_heat_flux(aero_nnodes, body=ibody)
-                cq_mag = np.sqrt(cqx*cqx + cqy*cqy + cqz*cqz)*scenario.thermal_scale 
+                cqx, cqy, cqz = self.fun3d_flow.extract_heat_flux(
+                    aero_nnodes, body=ibody
+                )
+                cq_mag = (
+                    np.sqrt(cqx * cqx + cqy * cqy + cqz * cqz) * scenario.thermal_scale
+                )
 
                 dTdn_dim = dTdn * scenario.T_inf
 
@@ -741,11 +745,11 @@ class Fun3d14Interface(SolverInterface):
                 k_dim = scenario.get_thermal_conduct(aero_temps)
 
                 # actually a heating rate integral(heat_flux) over the area
-                #heat_flux[:] = dTdn_dim[:] * k_dim[:]
-                #test = dTdn_dim[:] * k_dim[:]
+                # heat_flux[:] = dTdn_dim[:] * k_dim[:]
+                # test = dTdn_dim[:] * k_dim[:]
 
                 heat_flux[:] = cq_mag[:]
-                #print(max(heat_flux))
+                # print(max(heat_flux))
 
             else:
                 aero_temps = None
