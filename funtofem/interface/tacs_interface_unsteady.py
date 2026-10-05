@@ -21,6 +21,8 @@ limitations under the License.
 """
 
 from __future__ import print_function
+import json
+from collections import defaultdict
 
 __all__ = [
     "TacsIntegrationSettings",
@@ -125,7 +127,8 @@ class TacsUnsteadyInterface(SolverInterface):
         nprocs=None,
         debug=False,
         struct_interface_nodes: list | None = None,
-    ):
+        ):
+
         self.comm = comm
         self.tacs_comm = tacs_comm
         self.nprocs = nprocs
@@ -146,6 +149,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
         self.integration_settings = integration_settings
         self.gen_output = gen_output
+        self.results= defaultdict(dict)
 
         # override boolean to compute coordinate derivatives
         # when no shape variables present (needed for some unittests)
@@ -171,7 +175,7 @@ class TacsUnsteadyInterface(SolverInterface):
             for body in model.bodies:
                 body.initialize_struct_nodes(
                     struct_X_array[self.struct_X_indices], struct_id=struct_id
-                )
+                 )
 
     # Allocate data for each scenario
     class ScenarioData:
@@ -363,8 +367,10 @@ class TacsUnsteadyInterface(SolverInterface):
                     dof_per_node * self.struct_interface_nodes + self.thermal_index
                 )
 
+
         if self.tacs_proc:
             self._initialize_integrator(model)
+
 
     def _allocate_functions(self, scenario):
         """
@@ -611,7 +617,6 @@ class TacsUnsteadyInterface(SolverInterface):
                     ext_force_array[self.struct_load_indices] += struct_loads.astype(
                         TACS.dtype
                     )
-
                 # get and copy struct heat fluxes into ext_forces
                 struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
                 if struct_flux is not None:
@@ -633,13 +638,13 @@ class TacsUnsteadyInterface(SolverInterface):
                     struct_disps[:] = states[self.struct_load_indices].astype(
                         body.dtype
                     )
-
+                
                 # copy struct temps to the body, converting from gauge to absolute temp with T_ref
                 struct_temps = body.get_struct_temps(scenario, time_index=step)
                 if struct_temps is not None:
-                    struct_temps[:] = (
+                    struct_temps[:] = ( 
                         states[self.struct_thermal_indices].astype(body.dtype)
-                        + scenario.T_ref
+                        + scenario.T_ref  
                     )
 
         return fail
@@ -670,8 +675,8 @@ class TacsUnsteadyInterface(SolverInterface):
                     self.assembler.setVariables(vec)
                     # Write output .f5
                     self.gen_output(time_step)
-
         return
+
 
     def initialize_adjoint(self, scenario, bodies):
         """
