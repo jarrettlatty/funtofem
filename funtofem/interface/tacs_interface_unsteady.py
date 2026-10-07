@@ -21,6 +21,8 @@ limitations under the License.
 """
 
 from __future__ import print_function
+import json
+from collections import defaultdict
 
 __all__ = [
     "TacsIntegrationSettings",
@@ -124,7 +126,9 @@ class TacsUnsteadyInterface(SolverInterface):
         tacs_comm=None,
         nprocs=None,
         debug=False,
-    ):
+        struct_interface_nodes: list | None = None,
+        ):
+
         self.comm = comm
         self.tacs_comm = tacs_comm
         self.nprocs = nprocs
@@ -145,6 +149,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
         self.integration_settings = integration_settings
         self.gen_output = gen_output
+        self.results= defaultdict(dict)
 
         # override boolean to compute coordinate derivatives
         # when no shape variables present (needed for some unittests)
@@ -153,17 +158,24 @@ class TacsUnsteadyInterface(SolverInterface):
         # initialize variables
         self.model = model
         self._initialize_variables(
-            model, assembler, thermal_index=thermal_index, struct_id=struct_id
+            model,
+            assembler,
+            thermal_index=thermal_index,
+            struct_id=struct_id,
+            struct_interface_nodes=struct_interface_nodes,
         )
+        self.struct_transfer_nodes = struct_interface_nodes
 
         if self.assembler is not None:
-            if self.tacs_comm is None:
-                self.tacs_comm = self.assembler.getMPIComm()
-
+            struct_X_array = self.struct_X.getArray()
+            num_nodes = len(struct_X_array//3)
+            dof_per_node = self.assembler.getVarsPerNode()
+            
             # Initialize the structural nodes in the bodies
-            struct_X = self.struct_X.getArray()
             for body in model.bodies:
-                body.initialize_struct_nodes(struct_X, struct_id=struct_id)
+                body.initialize_struct_nodes(
+                    struct_X_array[self.struct_X_indices], struct_id=struct_id
+                 )
 
     # Allocate data for each scenario
     class ScenarioData:
@@ -268,6 +280,7 @@ class TacsUnsteadyInterface(SolverInterface):
         assembler=None,
         struct_id=None,
         thermal_index=0,
+        struct_interface_nodes=None,
     ):
         self.thermal_index = thermal_index
         self.struct_id = struct_id
@@ -310,8 +323,54 @@ class TacsUnsteadyInterface(SolverInterface):
                 self.assembler, func_list, func_tags
             )
 
+        # Set up indices for accessing the nodes, displacements and
+        # temperature within the solution array
+        self.struct_interface_nodes = struct_interface_nodes
+        self.struct_X_indices = None
+        self.struct_load_indices = None
+        self.struct_thermal_indices = None
+
+        if assembler is not None:
+            struct_X = self.struct_X.getArray()
+            num_nodes = len(struct_X) // 3
+            dof_per_node = self.assembler.getVarsPerNode()
+
+            if self.struct_interface_nodes is None:
+                self.struct_X_indices = slice(None)
+                self.struct_load_indices = np.zeros(3 * num_nodes, dtype=int)
+                self.struct_thermal_indices = np.zeros(num_nodes, dtype=int)
+
+                for i in range(3):
+                    self.struct_load_indices[i::3] = np.arange(
+                        i, num_nodes * dof_per_node, dof_per_node, dtype=int
+                    )
+                self.struct_thermal_indices[:] = np.arange(
+                    self.thermal_index,
+                    num_nodes * dof_per_node,
+                    dof_per_node,
+                    dtype=int,
+                )
+
+            else:
+                num_interface = len(self.struct_interface_nodes)
+                self.struct_X_indices = np.zeros(3 * num_interface, dtype=int)
+                self.struct_load_indices = np.zeros(3 * num_interface, dtype=int)
+                self.struct_thermal_indices = np.zeros(num_interface, dtype=int)
+
+                for i in range(3):
+                    self.struct_X_indices[i::3] = 3 * self.struct_interface_nodes + i
+                    self.struct_load_indices[i::3] = (
+                        dof_per_node * self.struct_interface_nodes + i
+                    )
+
+                self.struct_thermal_indices[:] = (
+                    dof_per_node * self.struct_interface_nodes + self.thermal_index
+                )
+
+
         if self.tacs_proc:
             self._initialize_integrator(model)
+
 
     def _allocate_functions(self, scenario):
         """
@@ -493,7 +552,7 @@ class TacsUnsteadyInterface(SolverInterface):
                 struct_X = self.struct_X.getArray()
 
                 # set the structural node locations into the array
-                struct_X[:] = body.get_struct_nodes()
+                struct_X[self.struct_X_indices] = body.get_struct_nodes()
 
                 # set the structural nodes into the tacs assembler
                 self.assembler.setNodes(self.struct_X)
@@ -549,26 +608,21 @@ class TacsUnsteadyInterface(SolverInterface):
             self.ext_force.zeroEntries()
             ext_force_array = self.ext_force.getArray()
 
-            # get ndof of the problem (3 for elastic, 4 for thermoelastic)
-            ndof = self.assembler.getVarsPerNode()
-
             # Copy external loads and heat fluxes to the structure
             # Does this overwrite loads from multiple bodies on same elements?
             for body in bodies:
                 # get and copy struct loads into ext_force_array
                 struct_loads = body.get_struct_loads(scenario, time_index=step)
                 if struct_loads is not None:
-                    for i in range(3):
-                        ext_force_array[i::ndof] += struct_loads[i::3].astype(
-                            TACS.dtype
-                        )
-
+                    ext_force_array[self.struct_load_indices] += struct_loads.astype(
+                        TACS.dtype
+                    )
                 # get and copy struct heat fluxes into ext_forces
                 struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
                 if struct_flux is not None:
-                    ext_force_array[self.thermal_index :: ndof] += struct_flux[
-                        :
-                    ].astype(TACS.dtype)
+                    ext_force_array[self.struct_thermal_indices] += struct_flux.astype(
+                        TACS.dtype
+                    )
 
             # Iterate the TACS integrator
             self.integrator[scenario.id].iterate(step, self.ext_force)
@@ -581,15 +635,16 @@ class TacsUnsteadyInterface(SolverInterface):
                 # copy struct_disps to the body
                 struct_disps = body.get_struct_disps(scenario, time_index=step)
                 if struct_disps is not None:
-                    for i in range(3):
-                        struct_disps[i::3] = states[i::ndof].astype(body.dtype)
-
+                    struct_disps[:] = states[self.struct_load_indices].astype(
+                        body.dtype
+                    )
+                
                 # copy struct temps to the body, converting from gauge to absolute temp with T_ref
                 struct_temps = body.get_struct_temps(scenario, time_index=step)
                 if struct_temps is not None:
-                    struct_temps[:] = (
-                        states[self.thermal_index :: ndof].astype(body.dtype)
-                        + scenario.T_ref
+                    struct_temps[:] = ( 
+                        states[self.struct_thermal_indices].astype(body.dtype)
+                        + scenario.T_ref  
                     )
 
         return fail
@@ -620,8 +675,8 @@ class TacsUnsteadyInterface(SolverInterface):
                     self.assembler.setVariables(vec)
                     # Write output .f5
                     self.gen_output(time_step)
-
         return
+
 
     def initialize_adjoint(self, scenario, bodies):
         """
@@ -731,20 +786,18 @@ class TacsUnsteadyInterface(SolverInterface):
                 rhs_func = self.struct_rhs_vec[ifunc].getArray()
                 rhs_func[:] = 0.0  # reset it to zero
 
-                ndof = self.assembler.getVarsPerNode()
                 # add struct_disps, struct_flux ajps to the res_adjoint or
                 # the residual of the TACS structural adjoint system
                 for body in bodies:
                     struct_disps_ajp = body.get_struct_disps_ajp(scenario)
                     if struct_disps_ajp is not None:
-                        for i in range(3):
-                            rhs_func[i::ndof] -= struct_disps_ajp[
-                                i::3, iadjoint
-                            ].astype(TACS.dtype)
+                        rhs_func[self.struct_load_indices] -= struct_disps_ajp[
+                            :, iadjoint
+                        ].astype(TACS.dtype)
 
                     struct_temps_ajp = body.get_struct_temps_ajp(scenario)
                     if struct_temps_ajp is not None:
-                        rhs_func[self.thermal_index :: ndof] -= struct_temps_ajp[
+                        rhs_func[self.struct_thermal_indices] -= struct_temps_ajp[
                             :, iadjoint
                         ].astype(TACS.dtype)
 
@@ -769,16 +822,15 @@ class TacsUnsteadyInterface(SolverInterface):
                     # pass on struct loads adjoint product
                     struct_loads_ajp = body.get_struct_loads_ajp(scenario)
                     if struct_loads_ajp is not None:
-                        for i in range(3):
-                            struct_loads_ajp[i::3, iadjoint] = -psi_array[
-                                i::ndof
-                            ].astype(body.dtype)
+                        struct_loads_ajp[:, iadjoint] = -psi_array[
+                            self.struct_load_indices
+                        ].astype(body.dtype)
 
                     # pass on struct flux adjoint product
                     struct_flux_ajp = body.get_struct_heat_flux_ajp(scenario)
                     if struct_flux_ajp is not None:
                         struct_flux_ajp[:, iadjoint] = -psi_array[
-                            self.thermal_index :: ndof
+                            self.struct_thermal_indices
                         ].astype(body.dtype)
 
         return fail
@@ -962,6 +1014,7 @@ class TacsUnsteadyInterface(SolverInterface):
         output_dir=None,
         callback=None,
         struct_options={},
+        struct_transfer_nodes_nastran = None,
         thermal_index=-1,
         debug=False,
     ):
@@ -980,6 +1033,8 @@ class TacsUnsteadyInterface(SolverInterface):
             Path to write f5 output
         callback: function
             The element callback function for pyTACS
+        struct_transfer_nodes_nastran: list
+            List of Nastran Node ids to initialize the tranfer scheme at
         struct_options: dictionary
             The options passed to pyTACS
         """
@@ -1042,6 +1097,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
         # get struct ids for coordinate derivatives and .sens file
         struct_id = None
+        local_transfer_tacs_ids = None
         if assembler is not None:
             # get list of local node IDs with global size, with -1 for nodes not owned by this proc
             num_nodes = fea_assembler.meshLoader.bdfInfo.nnodes
@@ -1049,6 +1105,10 @@ class TacsUnsteadyInterface(SolverInterface):
             local_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
                 bdfNodes, nastranOrdering=False
             )
+            if struct_transfer_nodes_nastran is not None:
+                global_transfer_tacs_ids =  fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
+                                                    struct_transfer_nodes_nastran, nastranOrdering=True)
+                local_transfer_tacs_ids = np.intersect1d(local_tacs_ids, global_transfer_tacs_ids)[1:]
 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
@@ -1098,4 +1158,5 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_id=struct_id,
             tacs_comm=tacs_comm,
             debug=debug,
+            struct_interface_nodes = local_transfer_tacs_ids,
         )

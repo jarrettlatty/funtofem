@@ -128,7 +128,6 @@ class Fun3d14Interface(SolverInterface):
         self.dFdqinf = []
 
         # heat flux
-        self.thermal_scale = 1.0  # = 1/2 * rho_inf * (V_inf)^3
         self.dHdq = []
 
         # optional per-step aerothermal diagnostics
@@ -456,7 +455,7 @@ class Fun3d14Interface(SolverInterface):
             elif "dynamic pressure" == var.name.lower():
                 scenario.qinf = var.value
             elif "thermal scale" == var.name.lower():
-                self.thermal_scale = var.value
+                scenario.thermal_scale = var.value
 
         # push the push the shape and rigid motion variables
         for ibody, body in enumerate(bodies, 1):
@@ -532,7 +531,7 @@ class Fun3d14Interface(SolverInterface):
     ):
         """
         Adds FUN3D's contribution to the aerodynamic surface coordinate derivatives.
-        This is just the grid adjoint variable, $\lambda_G$.
+        This is just the grid adjoint variable, $lambda_G$.
 
         Parameters
         ----------
@@ -733,6 +732,8 @@ class Fun3d14Interface(SolverInterface):
             if heat_flux is not None and aero_nnodes > 0:
                 # Extract the area-weighted temperature gradient normal to the wall (along the unit norm)
                 dTdn = self.fun3d_flow.extract_cqa(aero_nnodes, body=ibody)
+                cqx, cqy, cqz = self.fun3d_flow.extract_heat_flux(aero_nnodes, body=ibody)
+                cq_mag = np.sqrt(cqx*cqx + cqy*cqy + cqz*cqz)*scenario.thermal_scale 
 
                 dTdn_dim = dTdn * scenario.T_inf
 
@@ -740,7 +741,12 @@ class Fun3d14Interface(SolverInterface):
                 k_dim = scenario.get_thermal_conduct(aero_temps)
 
                 # actually a heating rate integral(heat_flux) over the area
-                heat_flux[:] = dTdn_dim[:] * k_dim[:]
+                #heat_flux[:] = dTdn_dim[:] * k_dim[:]
+                #test = dTdn_dim[:] * k_dim[:]
+
+                heat_flux[:] = cq_mag[:]
+                #print(max(heat_flux))
+
             else:
                 aero_temps = None
                 k_dim = None
