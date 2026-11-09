@@ -164,18 +164,18 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_id=struct_id,
             struct_interface_nodes=struct_interface_nodes,
         )
-        self.struct_transfer_nodes = struct_interface_nodes
+        self.struct_interface_nodes = struct_interface_nodes
 
         if self.assembler is not None:
             struct_X_array = self.struct_X.getArray()
-            num_nodes = len(struct_X_array//3)
-            dof_per_node = self.assembler.getVarsPerNode()
-            
             # Initialize the structural nodes in the bodies
             for body in model.bodies:
                 body.initialize_struct_nodes(
                     struct_X_array[self.struct_X_indices], struct_id=struct_id
                  )
+            
+
+            #print("Struct_X:\n",np.reshape(self.struct_X.getArray(), (3,-1)))
 
     # Allocate data for each scenario
     class ScenarioData:
@@ -334,7 +334,6 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_X = self.struct_X.getArray()
             num_nodes = len(struct_X) // 3
             dof_per_node = self.assembler.getVarsPerNode()
-
             if self.struct_interface_nodes is None:
                 self.struct_X_indices = slice(None)
                 self.struct_load_indices = np.zeros(3 * num_nodes, dtype=int)
@@ -366,8 +365,7 @@ class TacsUnsteadyInterface(SolverInterface):
                 self.struct_thermal_indices[:] = (
                     dof_per_node * self.struct_interface_nodes + self.thermal_index
                 )
-
-
+        
         if self.tacs_proc:
             self._initialize_integrator(model)
 
@@ -623,7 +621,6 @@ class TacsUnsteadyInterface(SolverInterface):
                     ext_force_array[self.struct_thermal_indices] += struct_flux.astype(
                         TACS.dtype
                     )
-
             # Iterate the TACS integrator
             self.integrator[scenario.id].iterate(step, self.ext_force)
 
@@ -1014,7 +1011,7 @@ class TacsUnsteadyInterface(SolverInterface):
         output_dir=None,
         callback=None,
         struct_options={},
-        struct_transfer_nodes_nastran = None,
+        struct_interface_nodes_nastran = None,
         thermal_index=-1,
         debug=False,
     ):
@@ -1033,7 +1030,7 @@ class TacsUnsteadyInterface(SolverInterface):
             Path to write f5 output
         callback: function
             The element callback function for pyTACS
-        struct_transfer_nodes_nastran: list
+        struct_inteface_nodes_nastran: list
             List of Nastran Node ids to initialize the tranfer scheme at
         struct_options: dictionary
             The options passed to pyTACS
@@ -1097,7 +1094,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
         # get struct ids for coordinate derivatives and .sens file
         struct_id = None
-        local_transfer_tacs_ids = None
+        local_interface_tacs_ids = None
         if assembler is not None:
             # get list of local node IDs with global size, with -1 for nodes not owned by this proc
             num_nodes = fea_assembler.meshLoader.bdfInfo.nnodes
@@ -1105,11 +1102,12 @@ class TacsUnsteadyInterface(SolverInterface):
             local_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
                 bdfNodes, nastranOrdering=False
             )
-            if struct_transfer_nodes_nastran is not None:
-                global_transfer_tacs_ids =  fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
-                                                    struct_transfer_nodes_nastran, nastranOrdering=True)
-                local_transfer_tacs_ids = np.intersect1d(local_tacs_ids, global_transfer_tacs_ids)[1:]
-
+            if struct_interface_nodes_nastran is not None:
+                global_interface_tacs_ids =  fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
+                                                    struct_interface_nodes_nastran, nastranOrdering=True)
+                local_interface_tacs_ids = np.intersect1d(local_tacs_ids, global_interface_tacs_ids)[1:]
+            #print("Local Transfer ID's: ",local_interface_tacs_ids,"\n")
+ 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
                 local_tacs_ids[nastran_node-1] = local_tacs_id
@@ -1126,7 +1124,7 @@ class TacsUnsteadyInterface(SolverInterface):
 
             # get number of non -1 tacs ids, total number of actual tacs_ids
             n_tacs_ids = len([tacs_id for tacs_id in local_tacs_ids if tacs_id != -1])
-
+            
             # reverse the tacs id to nastran ids map since we want tacs_id => nastran_id - 1
             nastran_ids = np.zeros((n_tacs_ids), dtype=np.int64)
             for nastran_id_m1, tacs_id in enumerate(local_tacs_ids):
@@ -1135,7 +1133,6 @@ class TacsUnsteadyInterface(SolverInterface):
 
             # convert back to list of nastran_ids owned by this processor in order
             struct_id = list(nastran_ids)
-
         # We might need to clean up this code. This is making educated guesses
         # about what index the temperature is stored. This could be wrong if things
         # change later. May query from TACS directly?
@@ -1158,5 +1155,5 @@ class TacsUnsteadyInterface(SolverInterface):
             struct_id=struct_id,
             tacs_comm=tacs_comm,
             debug=debug,
-            struct_interface_nodes = local_transfer_tacs_ids,
+            struct_interface_nodes = local_interface_tacs_ids,
         )

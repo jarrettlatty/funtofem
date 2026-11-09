@@ -647,6 +647,7 @@ class Fun3d14Interface(SolverInterface):
             )
             aero_nnodes = body.get_num_aero_nodes()
             deform = "deform" in body.motion_type
+
             if deform and aero_disps is not None and aero_nnodes > 0:
                 dx = np.asfortranarray(aero_disps[0::3])
                 dy = np.asfortranarray(aero_disps[1::3])
@@ -654,6 +655,7 @@ class Fun3d14Interface(SolverInterface):
                 dx = dx if self.complex_mode else dx.astype(np.double)
                 dy = dy if self.complex_mode else dy.astype(np.double)
                 dz = dz if self.complex_mode else dz.astype(np.double)
+
                 self.fun3d_flow.input_deformation(dx, dy, dz, body=ibody)
 
             # if "rigid" in body.motion_type and body.transfer is not None:

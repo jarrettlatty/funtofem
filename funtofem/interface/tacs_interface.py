@@ -64,6 +64,7 @@ class TacsInterface:
         thermal_index=-1,
         debug=False,
         relaxation_scheme: AitkenRelaxationTacs = None,
+        struct_interface_nodes: list | None = None,
     ):
         """
         Class method to create either a TacsSteadyInterface or TacsUnsteadyInterface instance using the pytacs BDF loader
@@ -91,6 +92,8 @@ class TacsInterface:
             index for thermal index
         relaxation_scheme: Relaxation Scheme Object
             Object to store relaxation scheme settings. If None, then no relaxation is used.
+        struct_interface_nodes: list
+            List of strucural bdf node ids on which to intialize the funtofem bodies.
         """
 
         # check whether each scenario is all steady or all unsteady
@@ -111,9 +114,10 @@ class TacsInterface:
                 thermal_index=thermal_index,
                 debug=debug,
                 relaxation_scheme=relaxation_scheme,
+                struct_interface_nodes_nastran = struct_interface_nodes
             )
         elif all(unsteady_list):
-            # create a TACS steady interface
+            # create a TACS unsteady interface
             return TacsUnsteadyInterface.create_from_bdf(
                 model=model,
                 comm=comm,
@@ -124,6 +128,7 @@ class TacsInterface:
                 struct_options=struct_options,
                 thermal_index=thermal_index,
                 debug=debug,
+                struct_interface_nodes_nastran = struct_interface_nodes
             )
         else:
             raise AssertionError(
@@ -158,6 +163,7 @@ class TacsSteadyInterface(SolverInterface):
         struct_loads_file=None,
         tacs_panel_dimensions=None,
         mesh_loader=None,
+        struct_interface_nodes: list | None = None,
     ):
         """
         Initialize the TACS implementation of the SolverInterface for the FUNtoFEM
@@ -202,6 +208,9 @@ class TacsSteadyInterface(SolverInterface):
         mesh_loader: ``TACS pyMeshLoader`` object
             Useful for getting component IDs of components in the structure.
             Used to get local ksfailure.
+        struct_interface_nodes: list or np.ndarray
+            List of local TACS node indices to restrict the FUNtoFEM transfer
+            scheme to. If None, all structural nodes are used (default behavior).
         """
 
         self.comm = comm
@@ -248,6 +257,7 @@ class TacsSteadyInterface(SolverInterface):
             thermal_index=thermal_index,
             struct_id=struct_id,
             relaxation_scheme=relaxation_scheme,
+            struct_interface_nodes=struct_interface_nodes,
         )
 
         if self.assembler is not None:
@@ -257,7 +267,9 @@ class TacsSteadyInterface(SolverInterface):
             # Initialize the structural nodes in the bodies
             struct_X = self.struct_X.getArray()
             for body in model.bodies:
-                body.initialize_struct_nodes(struct_X, struct_id=struct_id)
+                body.initialize_struct_nodes(
+                    struct_X[self.struct_X_indices], struct_id=struct_id
+                )
 
         # Read in fixed loads from file
         if self.struct_loads_file is not None:
@@ -288,6 +300,7 @@ class TacsSteadyInterface(SolverInterface):
         struct_id=None,
         thermal_index=0,
         relaxation_scheme: AitkenRelaxationTacs = None,
+        struct_interface_nodes=None,
     ):
         """
         Initialize the variables required for analysis and
@@ -404,6 +417,49 @@ class TacsSteadyInterface(SolverInterface):
             self.scenario_data[scenario] = self.ScenarioData(
                 self.assembler, func_list, func_tags
             )
+
+        # Set up indices for accessing the nodes, displacements and
+        # temperature within the solution array
+        self.struct_interface_nodes = struct_interface_nodes
+        self.struct_X_indices = None
+        self.struct_load_indices = None
+        self.struct_thermal_indices = None
+
+        if assembler is not None:
+            struct_X = self.struct_X.getArray()
+            num_nodes = len(struct_X) // 3
+            dof_per_node = self.assembler.getVarsPerNode()
+            if self.struct_interface_nodes is None:
+                self.struct_X_indices = slice(None)
+                self.struct_load_indices = np.zeros(3 * num_nodes, dtype=int)
+                self.struct_thermal_indices = np.zeros(num_nodes, dtype=int)
+
+                for i in range(3):
+                    self.struct_load_indices[i::3] = np.arange(
+                        i, num_nodes * dof_per_node, dof_per_node, dtype=int
+                    )
+                self.struct_thermal_indices[:] = np.arange(
+                    self.thermal_index,
+                    num_nodes * dof_per_node,
+                    dof_per_node,
+                    dtype=int,
+                )
+
+            else:
+                num_interface = len(self.struct_interface_nodes)
+                self.struct_X_indices = np.zeros(3 * num_interface, dtype=int)
+                self.struct_load_indices = np.zeros(3 * num_interface, dtype=int)
+                self.struct_thermal_indices = np.zeros(num_interface, dtype=int)
+
+                for i in range(3):
+                    self.struct_X_indices[i::3] = 3 * self.struct_interface_nodes + i
+                    self.struct_load_indices[i::3] = (
+                        dof_per_node * self.struct_interface_nodes + i
+                    )
+
+                self.struct_thermal_indices[:] = (
+                    dof_per_node * self.struct_interface_nodes + self.thermal_index
+                )
 
         return
 
@@ -698,7 +754,7 @@ class TacsSteadyInterface(SolverInterface):
                 struct_X = self.struct_X.getArray()
 
                 # Set the structural node locations into the array
-                struct_X[:] = body.get_struct_nodes()
+                struct_X[self.struct_X_indices] = body.get_struct_nodes()
 
                 # Reset the node locations in TACS (possibly distributing the
                 # node locations across TACS processors)
@@ -775,7 +831,6 @@ class TacsSteadyInterface(SolverInterface):
             ext_force_array = self.ext_force.getArray()
 
             # Add the external load and heat fluxes on the structure
-            ndof = self.assembler.getVarsPerNode()
             for body in bodies:
                 struct_loads = body.get_struct_loads(scenario, time_index=step)
                 if self._debug:
@@ -785,26 +840,24 @@ class TacsSteadyInterface(SolverInterface):
                     print(f"norm of imaginary struct_loads: {imag_norm(struct_loads)}")
                     print(f"========================================\n", flush=True)
                 if struct_loads is not None:
-                    for i in range(3):
-                        ext_force_array[i::ndof] += struct_loads[i::3].astype(
-                            TACS.dtype
-                        )
+                    ext_force_array[self.struct_load_indices] += struct_loads.astype(
+                        TACS.dtype
+                    )
 
                 struct_flux = body.get_struct_heat_flux(scenario, time_index=step)
                 if struct_flux is not None:
-                    ext_force_array[self.thermal_index :: ndof] += struct_flux[
+                    ext_force_array[self.struct_thermal_indices] += struct_flux[
                         :
                     ].astype(TACS.dtype)
 
                 if self.struct_loads_file is not None:
                     fixed_struct_loads = body._fixed_struct_loads[scenario.id]
                     fixed_struct_heat_flux = body._fixed_struct_heat_flux[scenario.id]
-                    for i in range(3):
-                        ext_force_array[i::ndof] += fixed_struct_loads[i::3].astype(
-                            TACS.dtype
-                        )
                     ext_force_array[
-                        self.thermal_index :: ndof
+                        self.struct_load_indices
+                    ] += fixed_struct_loads.astype(TACS.dtype)
+                    ext_force_array[
+                        self.struct_thermal_indices
                     ] += fixed_struct_heat_flux[:].astype(TACS.dtype)
 
             # add in optional constant load
@@ -876,15 +929,16 @@ class TacsSteadyInterface(SolverInterface):
             for body in bodies:
                 struct_disps = body.get_struct_disps(scenario, time_index=step)
                 if struct_disps is not None:
-                    for i in range(3):
-                        struct_disps[i::3] = ans_array[i::ndof].astype(body.dtype)
+                    struct_disps[:] = ans_array[self.struct_load_indices].astype(
+                        body.dtype
+                    )
 
                 # Set the structural temperature
                 struct_temps = body.get_struct_temps(scenario, time_index=step)
                 if struct_temps is not None:
                     # absolute temperature in Kelvin of the structural surface
                     struct_temps[:] = (
-                        ans_array[self.thermal_index :: ndof].astype(body.dtype)
+                        ans_array[self.struct_thermal_indices].astype(body.dtype)
                         + scenario.T_ref
                     )
 
@@ -1078,7 +1132,6 @@ class TacsSteadyInterface(SolverInterface):
                 # Extract the array in-place
                 array = self.res.getArray()
 
-                ndof = self.assembler.getVarsPerNode()
                 for body in bodies:
                     # Form new right-hand side of structural adjoint equation using state
                     # variable sensitivites and the transformed temperature transfer
@@ -1086,14 +1139,13 @@ class TacsSteadyInterface(SolverInterface):
                     # structural displacements and structural temperatures.
                     struct_disps_ajp = body.get_struct_disps_ajp(scenario)
                     if struct_disps_ajp is not None:
-                        for i in range(3):
-                            array[i::ndof] -= struct_disps_ajp[i::3, ifunc].astype(
-                                TACS.dtype
-                            )
+                        array[self.struct_load_indices] -= struct_disps_ajp[
+                            :, ifunc
+                        ].astype(TACS.dtype)
 
                     struct_temps_ajp = body.get_struct_temps_ajp(scenario)
                     if struct_temps_ajp is not None:
-                        array[self.thermal_index :: ndof] -= struct_temps_ajp[
+                        array[self.struct_thermal_indices] -= struct_temps_ajp[
                             :, ifunc
                         ].astype(TACS.dtype)
 
@@ -1173,16 +1225,15 @@ class TacsSteadyInterface(SolverInterface):
                     # struct_loads_ajp = psi_S^{T} * dS/dfS
                     struct_loads_ajp = body.get_struct_loads_ajp(scenario)
                     if struct_loads_ajp is not None:
-                        for i in range(3):
-                            struct_loads_ajp[i::3, ifunc] = -psi_array[i::ndof].astype(
-                                body.dtype
-                            )
+                        struct_loads_ajp[:, ifunc] = -psi_array[
+                            self.struct_load_indices
+                        ].astype(body.dtype)
 
                     # struct_flux_ajp = psi_S^{T} * dS/dfS
                     struct_flux_ajp = body.get_struct_heat_flux_ajp(scenario)
                     if struct_flux_ajp is not None:
                         struct_flux_ajp[:, ifunc] = -psi_array[
-                            self.thermal_index :: ndof
+                            self.struct_thermal_indices
                         ].astype(body.dtype)
 
         return fail
@@ -1365,6 +1416,8 @@ class TacsSteadyInterface(SolverInterface):
         return
 
     @classmethod
+    #TODO, ad the output_dir flag to the steady iterface
+
     def create_from_bdf(
         cls,
         model,
@@ -1383,6 +1436,7 @@ class TacsSteadyInterface(SolverInterface):
         panel_length_dv_index=None,
         panel_width_dv_index=None,
         inertial_loads=False,
+        struct_interface_nodes_nastran=None,
     ):
         """
         Class method to create a TacsSteadyInterface instance using the pytacs BDF loader
@@ -1413,6 +1467,9 @@ class TacsSteadyInterface(SolverInterface):
             DV index of panel width in the callback. For GP, this should be 5.
         inertial_loads: bool
             Whether to add auxiliary elements to include inertial loads.
+        struct_interface_nodes_nastran: list
+            List of Nastran Node ids to restrict the FUNtoFEM transfer scheme to.
+            If None, all structural nodes are used (default behavior).
         """
 
         # Split the communicator
@@ -1514,6 +1571,7 @@ class TacsSteadyInterface(SolverInterface):
         # get struct ids for coordinate derivatives and .sens file
         struct_id = None
         mesh_loader = None
+        local_interface_tacs_ids = None
         if assembler is not None:
             # get list of local node IDs with global size, with -1 for nodes not owned by this proc
             num_nodes = fea_assembler.meshLoader.bdfInfo.nnodes
@@ -1523,6 +1581,14 @@ class TacsSteadyInterface(SolverInterface):
             )
 
             mesh_loader = fea_assembler.meshLoader
+
+            if struct_interface_nodes_nastran is not None:
+                global_interface_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
+                    struct_interface_nodes_nastran, nastranOrdering=True
+                )
+                local_interface_tacs_ids = np.intersect1d(
+                    local_tacs_ids, global_interface_tacs_ids
+                )[1:]
 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
@@ -1583,6 +1649,7 @@ class TacsSteadyInterface(SolverInterface):
             struct_loads_file=struct_loads_file,
             tacs_panel_dimensions=tacs_panel_dimensions,
             mesh_loader=mesh_loader,
+            struct_interface_nodes=local_interface_tacs_ids,
         )
 
     @classmethod
@@ -1603,6 +1670,7 @@ class TacsSteadyInterface(SolverInterface):
         struct_loads_file=None,
         panel_length_dv_index=0,
         panel_width_dv_index=5,
+        struct_interface_nodes_nastran=None,
     ):
         """
         Class method to create a TacsSteadyInterface instance using the pytacs BDF loader
@@ -1627,6 +1695,9 @@ class TacsSteadyInterface(SolverInterface):
             Object to store relaxation scheme settings. If None, then no relaxation is used.
         struct_loads_file: str
             File name of the struct_loads_file to be used as a constant load to the structure.
+        struct_interface_nodes_nastran: list
+            List of Nastran Node ids to restrict the FUNtoFEM transfer scheme to.
+            If None, all structural nodes are used (default behavior).
         """
 
         # Split the communicator
@@ -1724,6 +1795,7 @@ class TacsSteadyInterface(SolverInterface):
 
         # get struct ids for coordinate derivatives and .sens file
         struct_id = None
+        local_interface_tacs_ids = None
         if assembler is not None:
             # get list of local node IDs with global size, with -1 for nodes not owned by this proc
             num_nodes = fea_assembler.meshLoader.bdfInfo.nnodes
@@ -1731,6 +1803,14 @@ class TacsSteadyInterface(SolverInterface):
             local_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
                 bdfNodes, nastranOrdering=False
             )
+
+            if struct_interface_nodes_nastran is not None:
+                global_interface_tacs_ids = fea_assembler.meshLoader.getLocalNodeIDsFromGlobal(
+                    struct_interface_nodes_nastran, nastranOrdering=True
+                )
+                local_interface_tacs_ids = np.intersect1d(
+                    local_tacs_ids, global_interface_tacs_ids
+                )[1:]
 
             """
             the local_tacs_ids list maps nastran nodes to tacs indices with:
@@ -1790,6 +1870,7 @@ class TacsSteadyInterface(SolverInterface):
             relaxation_scheme=relaxation_scheme,
             struct_loads_file=struct_loads_file,
             tacs_panel_dimensions=tacs_panel_dimensions,
+            struct_interface_nodes=local_interface_tacs_ids,
         )
 
 
